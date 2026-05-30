@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="cola/cola.vcxproj" Id="728c8ce0-ef69-4187-820c-eea0e3b66a3f" />
+</Solution>

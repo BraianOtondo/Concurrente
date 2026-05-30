@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="soldadora/soldadora.vcxproj" Id="4458ef56-4455-44f3-994a-67f8a76628c9" />
+</Solution>
