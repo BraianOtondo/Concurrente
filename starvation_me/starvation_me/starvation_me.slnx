@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="tp/tp.vcxproj" Id="cd6a6c24-bfba-4d27-a378-64f644d1ff26" />
+  <Project Path="starvation_me/starvation_me.vcxproj" Id="fbd32792-cd11-4774-a32d-a2953eab0cdd" />
 </Solution>

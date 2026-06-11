@@ -5,16 +5,19 @@
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
+#include <vector>
 #include <map>
-
 struct Semaforo {
     int contador;
     std::mutex mtx;
     std::condition_variable cv;
 };
 
-// --- AQUÍ ESTÁ EL CAMBIO DE LAS ESTRUCTURAS ---
-
+std::mutex mtx_buffer;
+std::queue<int> buffer; // recurso compartido
+Semaforo hay_espacio;
+Semaforo hay_datos;
+//-------
 struct StarvationTask {
     std::thread::id hilo;
     int prioridad;
@@ -22,21 +25,20 @@ struct StarvationTask {
 };
 
 bool compararStarvationTask(const StarvationTask& a, const StarvationTask& b) {
-    return a.prioridad < b.prioridad; // Ordena de mayor a menor prioridad
+    return a.prioridad < b.prioridad;
 }
 
 struct StarvationLock {
     std::mutex mtx;
     std::condition_variable cv;
 
-    // Puntero a función para que la cola de prioridad sepa cómo ordenar
     std::priority_queue<StarvationTask, std::vector<StarvationTask>, bool (*)(const StarvationTask&, const StarvationTask&)> colaHilos;
+
     std::map<std::thread::id, StarvationTask> estadoHilos;
+
     bool lockTomado = false;
 
-    // Constructor obligatorio para pasarle la función de comparación a la priority_queue
-    StarvationLock() : colaHilos(compararStarvationTask) {}
-
+    StarvationLock();
     void lock(int prioridad);
     void unlock();
 };
@@ -45,6 +47,7 @@ void StarvationLock::lock(int prioridad) {
     std::unique_lock<std::mutex> l(mtx);
     std::thread::id hiloId = std::this_thread::get_id();
 
+    //lo busco para no volver a encolarlo, o lo creo si no estaba encolado
     std::map<std::thread::id, StarvationTask>::iterator it = estadoHilos.find(hiloId);
     if (it == estadoHilos.end()) {
         StarvationTask tarea;
@@ -78,106 +81,120 @@ void StarvationLock::lock(int prioridad) {
         it->second.encolado = false;
     }
 }
-
 void StarvationLock::unlock() {
     std::lock_guard<std::mutex> l(mtx);
     lockTomado = false;
-    cv.notify_all(); // Despierta a todos para que el nuevo "top" de la cola tome el control
+    cv.notify_all();
 }
 
-// --- RECURSOS COMPARTIDOS ---
 
-// Reemplazamos el std::mutex común por nuestro candado personalizado
-StarvationLock mtx_buffer;
+//---------
 
-std::queue<int> buffer;
-Semaforo hay_espacio;
-Semaforo hay_datos;
+struct FairLock {
+    std::mutex mtx;
+    std::condition_variable cv;
+    unsigned long proximo_turno = 0;
+    unsigned long turno_actual = 0;
 
-void init(Semaforo& s, int n) { s.contador = n; }
+    void lock();
+    void unlock();
+};
+
+void FairLock::lock() {
+    std::unique_lock<std::mutex> l(mtx);
+    unsigned long mi_turno = proximo_turno++;
+    std::cout << "Turno: " << mi_turno << " - Thread entrante: " << std::this_thread::get_id() << std::endl;
+
+    // El hilo se bloquea hasta que sea su turno exacto
+    while (mi_turno != turno_actual) {
+        cv.wait(l);
+    }
+}
+
+void FairLock::unlock() {
+    std::lock_guard<std::mutex> l(mtx);
+    std::cout << "Turno: " << turno_actual << " - Thread saliente: " << std::this_thread::get_id() << std::endl;
+    turno_actual++;
+    // Despertamos a todos para que revisen si es su turno
+    cv.notify_all();
+}
+
+
+
+void init(Semaforo& s, int n) {
+    s.contador = n;
+}
 void wait(Semaforo& s) {
     std::unique_lock<std::mutex> lock(s.mtx);
-    while (s.contador == 0) { s.cv.wait(lock); }
-    s.contador--;
+
+    while (s.contador == 0) {
+        s.cv.wait(lock);  // bloquea el hilo
+    }
+
+    s.contador--;  // consume un permiso
 }
 void signal(Semaforo& s) {
     std::unique_lock<std::mutex> lock(s.mtx);
-    s.contador++;
-    s.cv.notify_one();
+
+    s.contador++;        // libera un permiso
+    s.cv.notify_one();   // despierta UN hilo en espera
 }
 
 const int tam = 5;
 int val = 0;
 
-// Le pasamos un ID y una prioridad al productor para simular diferencias
-void productor(int id_productor, int prioridad) {
+void productor() {
+    int producidos = 0;
     for (int i = 0; i < tam; i++) {
+        // 1. Espera a que haya un hueco libre
         wait(hay_espacio);
 
-        // ACTIVACIÓN: Usamos nuestro lock pasándole la prioridad del hilo
-        mtx_buffer.lock(prioridad);
-
-        std::cout << "[Productor " << id_productor << " - Prio: " << prioridad << "] Produciendo elemento...\n";
+        // 2. Mutex de la cola
+        //mtx_buffer.lock(100);
+        mtx_buffer.lock();
+        std::cout << "Produciendo\n";
         buffer.push(val++);
-
         mtx_buffer.unlock();
 
+        // 3. Avisa que hay un nuevo dato disponible
         signal(hay_datos);
     }
 }
 
 void consumidor() {
     for (int i = 0; i < tam * 10; i++) {
+        // 1. Espera a que haya al menos un dato
         wait(hay_datos);
 
-        // El consumidor también compite, le ponemos prioridad base 0
-        mtx_buffer.lock(0);
-
-        int elemento = buffer.front();
-        std::cout << ">>> [Consumidor] Procesando elemento: " << elemento << std::endl;
+        // 2. Mutex de la cola
+        //mtx_buffer.lock(0);
+        mtx_buffer.lock();
+        int val = buffer.front();
+        std::cout << ">>> [Consumidor] Procesando elemento: " << val << std::endl;
         buffer.pop();
-
         mtx_buffer.unlock();
 
+        // 3. Avisa que libera un espacio
         signal(hay_espacio);
     }
 }
 
+
+
 int main() {
-  /* init(hay_espacio, 50);
+    const int NUM_PRODUCTORES = 10;
+    init(hay_espacio, 50);
     init(hay_datos, 0);
 
     std::vector<std::thread> productores;
 
-    // Lanzamos 10 productores con prioridades distintas
-    for (int i = 0; i < 10; ++i) {
-        // Los últimos productores tendrán mayor prioridad (i * 10)
-        productores.emplace_back(productor, i, i * 10);
+    for (int i = 0; i < NUM_PRODUCTORES; ++i) {
+        productores.emplace_back(productor);
     }
 
+    // Un solo consumidor
     std::thread c(consumidor);
 
     for (auto& t : productores) t.join();
     c.join();
-
-    return 0;*/
-    init(hay_espacio, 5); // Buffer chico para forzar la espera concurrente
-    init(hay_datos, 0);
-
-    std::cout << "--- PRUEBA MANUAL DE PRIORIDADES CON TU PROCEDIMIENTO ---" << std::endl;
-
-    // Lanzamos 3 productores manuales con ID enteros y prioridades bien distanciadas
-    std::thread p1(productor ,1, 10);  // Productor 1: Prioridad Baja
-    std::thread p2(productor ,2, 50);  // Productor 2: Prioridad Media
-    std::thread p3(productor ,3, 100); // Productor 3: Prioridad Alta (VIP)
-    
-    std::thread c(consumidor);
-
-    p1.join();
-    p2.join();
-    p3.join();
-    c.join();
-
-    std::cout << "--- FIN DE LA PRUEBA ---" << std::endl;
-    return 0;
 }
